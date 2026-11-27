@@ -1352,7 +1352,9 @@ fn fuzz_element_fields() {
         // a block: from one line start to the next blank line (or the end), now and then none
         let at = *r.pick(&edges);
         let start = src[..at].rfind("\n\n").map_or(0, |i| i + 2);
-        let end = src[at..].find("\n\n").map_or(src.len(), |i| at + i);
+        // a block ends at the first blank line after its start (a position inside a blank line
+        // is no block's: it takes the one before)
+        let end = src[start..].find("\n\n").map_or(src.len(), |i| start + i);
         let block = r.chance(70).then_some(start..end.max(start));
         let el = f.guard("element_at", &src, || {
             element::element_at(&src, block.clone(), at)

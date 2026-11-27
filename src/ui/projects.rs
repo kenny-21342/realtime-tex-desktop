@@ -125,12 +125,18 @@ pub fn init(cx: &mut App) {
 const QUIT_RUN_LIMIT: Duration = Duration::from_secs(45);
 
 /// Quit the app. With "Compile when quitting" on, every TeX document is first saved and compiled
-/// the chosen number of times; ⌘Q again quits without waiting.
+/// the chosen number of times; with "Export the PDF when quitting" on, each is then exported
+/// beside its file. ⌘Q again quits without waiting.
 pub fn quit(cx: &mut App) {
     let s = AppSettings::get(cx);
-    let (on, runs) = (s.compile_on_quit, s.compile_runs.clamp(1, 5));
+    let (compile, export) = (s.compile_on_quit, s.export_on_quit);
+    let runs = if compile {
+        s.compile_runs.clamp(1, 5)
+    } else {
+        0
+    };
     let again = std::mem::replace(&mut cx.global_mut::<Projects>().quitting, true);
-    if !on || again {
+    if !(compile || export) || again {
         return cx.quit();
     }
     let windows: Vec<_> = cx
@@ -143,7 +149,7 @@ pub fn quit(cx: &mut App) {
     let mut busy = false;
     for ws in &windows {
         busy |= ws
-            .update(cx, |ws, cx| ws.compile_for_quit(runs, cx))
+            .update(cx, |ws, cx| ws.prepare_quit(runs, export, cx))
             .unwrap_or(false);
     }
     if !busy {
@@ -151,7 +157,7 @@ pub fn quit(cx: &mut App) {
     }
     let ws = windows;
     cx.spawn(async move |cx| {
-        let until = Instant::now() + QUIT_RUN_LIMIT * runs;
+        let until = Instant::now() + QUIT_RUN_LIMIT * (runs + u32::from(export));
         while Instant::now() < until {
             cx.background_executor()
                 .timer(Duration::from_millis(100))

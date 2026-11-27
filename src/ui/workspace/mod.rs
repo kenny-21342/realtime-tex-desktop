@@ -251,11 +251,18 @@ impl Workspace {
         }
     }
 
-    /// The app is quitting: every TeX document saved and compiled `runs` times; whether any is.
-    pub fn compile_for_quit(&mut self, runs: u32, cx: &mut Context<Self>) -> bool {
+    /// The app is quitting: every TeX document saved and compiled `runs` times (none when 0),
+    /// then its PDF exported if `export`; whether any has work to wait for.
+    pub fn prepare_quit(&mut self, runs: u32, export: bool, cx: &mut Context<Self>) -> bool {
         let mut any = false;
         for d in &self.tabs {
-            any |= d.update(cx, |d, cx| d.compile_for_quit(runs, cx));
+            any |= d.update(cx, |d, cx| {
+                let mut busy = runs > 0 && d.compile_for_quit(runs, cx);
+                if export {
+                    busy |= d.export_for_quit(cx);
+                }
+                busy
+            });
         }
         any
     }

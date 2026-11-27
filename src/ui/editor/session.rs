@@ -112,6 +112,7 @@ impl Doc {
                 }));
                 self.compiling = false;
                 self.quit_runs = 0;
+                self.quit_export = QuitExport::No;
             }
             engine::Msg::Compiling => self.compiling = true,
             engine::Msg::Exported { path, ok } => {
@@ -120,9 +121,12 @@ impl Doc {
                         .file_name()
                         .map_or(p.to_string(), |n| n.to_string_lossy().to_string())
                 };
+                // the export a quit asked for is no time to open a viewer
+                let quitting =
+                    std::mem::replace(&mut self.quit_export, QuitExport::No) == QuitExport::Asked;
                 if let Some(p) = path
                     .as_ref()
-                    .filter(|_| AppSettings::get(cx).open_after_export)
+                    .filter(|_| !quitting && AppSettings::get(cx).open_after_export)
                 {
                     cx.open_with_system(Path::new(p));
                 }
@@ -155,6 +159,7 @@ impl Doc {
                 self.rtex = None;
                 self.compiling = false;
                 self.quit_runs = 0;
+                self.quit_export = QuitExport::No;
             }
         }
         self.blocks = document::blocks(&self.spans, &self.source, &self.preview);

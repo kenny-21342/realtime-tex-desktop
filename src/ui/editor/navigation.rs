@@ -292,6 +292,26 @@ impl Doc {
         y
     }
 
+    /// The pages' sizes at zoom 1 (px): width and height, in order.
+    fn page_sizes(&self) -> Vec<(f32, f32)> {
+        self.preview
+            .pages
+            .values()
+            .map(|dl| {
+                (
+                    page_px(dl.page_width.unwrap_or(40258437.0), 1.0),
+                    page_px(dl.page_height.unwrap_or(0.0), 1.0),
+                )
+            })
+            .collect()
+    }
+
+    /// The least the page column is wide at the zoom now: its widest page and the space beside
+    /// it, so a page wider than the view scrolls sideways to both of its edges.
+    pub(super) fn column_min_width(&self) -> f32 {
+        column_width(&self.page_sizes(), self.zoom)
+    }
+
     /// Zoom to `z`, keeping the point `anchor` (window coordinates; default the view's centre)
     /// where it is on screen.
     pub fn set_zoom(
@@ -308,16 +328,16 @@ impl Doc {
         let view = self.scroll.bounds();
         let p = anchor.unwrap_or(view.center()) - view.origin;
         let off = self.scroll.offset();
-        let ratio = z / self.zoom;
-        // content under the anchor, scaled; the top padding does not scale
-        let cx_ = (f32::from(p.x - off.x)) * ratio;
-        let cy_ = (f32::from(p.y - off.y) - PAGES_TOP) * ratio + PAGES_TOP;
+        let (x, y) = zoom_offset(
+            &self.page_sizes(),
+            (f32::from(view.size.width), f32::from(view.size.height)),
+            (self.zoom, z),
+            (f32::from(p.x), f32::from(p.y)),
+            (f32::from(off.x), f32::from(off.y)),
+        );
         self.zoom = z;
         self.zoomed_at = Instant::now();
-        self.scroll.set_offset(point(
-            px((f32::from(p.x) - cx_).min(0.0)),
-            px((f32::from(p.y) - cy_).min(0.0)),
-        ));
+        self.scroll.set_offset(point(px(x), px(y)));
         self.render_live(window, cx);
         cx.notify();
     }
@@ -352,6 +372,58 @@ impl Doc {
 
 /// Room kept between what scrolls into view and the view's edge, in px.
 const MARGIN: f32 = 40.0;
+
+/// The space beside the pages in their column (its padding), in px.
+pub(super) const COLUMN_PAD: f32 = 64.0;
+
+/// How wide the page column is at zoom `z` for `pages` (width, height at zoom 1): the view's
+/// width when every page fits in it, else the widest page and its space.
+fn column_width(pages: &[(f32, f32)], z: f32) -> f32 {
+    pages.iter().map(|p| p.0 * z).fold(0.0, f32::max) + COLUMN_PAD
+}
+
+/// The scroll offset after zooming from `zoom.0` to `zoom.1` that keeps the point `p` (px from
+/// the view's corner) on the same spot of the page it is over. `pages` are the pages' sizes at
+/// zoom 1, `view` the view's size, `off` the offset now (zero or less). The pages scale, but the
+/// gaps between them do not, and a page is centred in a column no narrower than the view: the
+/// point is placed by the page it is over, not by scaling the whole column.
+pub(super) fn zoom_offset(
+    pages: &[(f32, f32)],
+    view: (f32, f32),
+    zoom: (f32, f32),
+    p: (f32, f32),
+    off: (f32, f32),
+) -> (f32, f32) {
+    let (old, new) = zoom;
+    let ratio = new / old;
+    let (ax, ay) = (p.0 - off.0, p.1 - off.1);
+    let top =
+        |n: usize, z: f32| PAGES_TOP + pages[..n].iter().map(|p| p.1 * z + PAGE_GAP).sum::<f32>();
+    let wide = |z: f32| view.0.max(column_width(pages, z));
+    // the page the point is over: the last one that starts above it
+    let n = (0..pages.len())
+        .rev()
+        .find(|&n| top(n, old) <= ay)
+        .unwrap_or(0);
+    let (nx, ny) = match pages.get(n) {
+        Some(&(w, h)) => {
+            // along the page, scaled; past its ends (a gap, the desk) the distance stays
+            let along = |v: f32, start: f32, len: f32| {
+                let inside = (v - start).clamp(0.0, len);
+                (inside, v - start - inside)
+            };
+            let (ix, ex) = along(ax, (wide(old) - w * old) / 2.0, w * old);
+            let (iy, ey) = along(ay, top(n, old), h * old);
+            (
+                (wide(new) - w * new) / 2.0 + ix * ratio + ex,
+                top(n, new) + iy * ratio + ey,
+            )
+        }
+        None => (ax * ratio, (ay - PAGES_TOP) * ratio + PAGES_TOP),
+    };
+    let most = (wide(new) - view.0).max(0.0);
+    ((p.0 - nx).clamp(-most, 0.0), (p.1 - ny).min(0.0))
+}
 
 /// The view's new top to bring `span` (top, bottom, px) into `view` (top, height), moving as
 /// little as it can; None when it is in view already (`any`: when any of it shows, else all).
@@ -392,5 +464,89 @@ mod scroll_tests {
         );
         // a line above: its top near the view's top
         assert_eq!(into_view((900.0, 920.0), view, false), Some(900.0 - MARGIN));
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::{PAGE_GAP, PAGES_TOP, zoom_offset};
+
+    /// Four letter pages (612 × 792 at zoom 1) in a 1920 × 1080 view.
+    const PAGES: [(f32, f32); 4] = [(612.0, 792.0); 4];
+    const VIEW: (f32, f32) = (1920.0, 1080.0);
+
+    /// Where the page-relative point (`fx`, `fy` of page `n`'s size) is on screen, the page
+    /// column laid out as the editor does at `zoom` with scroll offset `off`.
+    fn on_screen(n: usize, fx: f32, fy: f32, zoom: f32, off: (f32, f32)) -> (f32, f32) {
+        let wide = VIEW.0.max(612.0 * zoom + 64.0);
+        let top = PAGES_TOP + n as f32 * (792.0 * zoom + PAGE_GAP);
+        (
+            off.0 + (wide - 612.0 * zoom) / 2.0 + fx * 612.0 * zoom,
+            off.1 + top + fy * 792.0 * zoom,
+        )
+    }
+
+    /// The point at (`fx`, `fy`) of page `n` at zoom `a`, pinched to zoom `b`: where it is on
+    /// screen before and after. Sideways it can only hold when the page then overflows the view
+    /// (else it is centred whatever the offset).
+    fn pinched(n: usize, (fx, fy): (f32, f32), a: f32, b: f32) -> ((f32, f32), (f32, f32)) {
+        let top = PAGES_TOP + n as f32 * (792.0 * a + PAGE_GAP);
+        let off = (0.0, (100.0 - top).min(0.0));
+        let at = on_screen(n, fx, fy, a, off);
+        let now = zoom_offset(&PAGES, VIEW, (a, b), at, off);
+        (at, on_screen(n, fx, fy, b, now))
+    }
+
+    #[test]
+    fn the_point_under_the_fingers_stays_on_its_page_spot() {
+        // the fourth page's upper part, from 200% to 400%
+        let ((x, y), (x2, y2)) = pinched(3, (0.3, 0.2), 2.0, 4.0);
+        assert!(y > 0.0 && y < VIEW.1, "{y}");
+        assert!(
+            (x2 - x).abs() < 0.01 && (y2 - y).abs() < 0.01,
+            "{x2},{y2} for {x},{y}"
+        );
+    }
+
+    #[test]
+    fn it_holds_zooming_out_and_in_at_every_page() {
+        for n in 0..4 {
+            for (a, b) in [(1.0, 0.5), (0.5, 1.5), (1.0, 3.0), (3.0, 1.0), (2.0, 4.0)] {
+                let ((x, y), (x2, y2)) = pinched(n, (0.5, 0.1), a, b);
+                // the page's top may be at the view's top already: the offset cannot go past it
+                let held_y = (y2 - y).abs() < 0.01;
+                let at_top = n == 0 || b < a;
+                assert!(held_y || at_top, "page {n} {a}→{b}: y {y2} for {y}");
+                if 612.0 * b + 64.0 > VIEW.0 {
+                    assert!((x2 - x).abs() < 0.01, "page {n} {a}→{b}: x {x2} for {x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gaps_between_pages_do_not_scale() {
+        // 200% → 400% over the fourth page: scaling the whole column would be off by the three
+        // gaps it passes (72 px) times the change of zoom
+        let ((_, y), (_, y2)) = pinched(3, (0.5, 0.5), 2.0, 4.0);
+        assert!((y2 - y).abs() < 0.01, "{y2} for {y}");
+    }
+
+    #[test]
+    fn a_page_wider_than_the_view_scrolls_to_both_its_edges() {
+        // at 400% the page is 2448 wide in a 1920 view: the offset may go 592 px to the left
+        let (x, _) = zoom_offset(&PAGES, VIEW, (1.0, 4.0), (1900.0, 500.0), (0.0, 0.0));
+        assert!((-592.0..=0.0).contains(&x), "{x}");
+        assert_eq!(x, -592.0);
+        // and the view's left edge pinned at the page's left edge keeps the page there
+        let (x, _) = zoom_offset(&PAGES, VIEW, (1.0, 4.0), (0.0, 500.0), (0.0, 0.0));
+        assert_eq!(x, 0.0);
+    }
+
+    #[test]
+    fn no_pages_scale_about_the_point() {
+        let (x, y) = zoom_offset(&[], VIEW, (1.0, 2.0), (100.0, PAGES_TOP + 50.0), (0.0, 0.0));
+        // (no pages: no room sideways)
+        assert_eq!((x, y), (0.0, -50.0));
     }
 }

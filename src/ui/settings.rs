@@ -91,6 +91,8 @@ pub struct AppSettings {
     /// Quitting saves and runs the full LaTeX compile `compile_runs` times first.
     pub compile_on_quit: bool,
     pub compile_runs: u32,
+    /// Quitting also exports each document's PDF beside its .tex file (after the compile runs).
+    pub export_on_quit: bool,
     /// Open an exported PDF in the default viewer.
     pub open_after_export: bool,
     /// rtex's fast-path budget per paragraph, in ms (`--fast-budget-ms`).
@@ -190,6 +192,7 @@ impl Default for AppSettings {
             autosave_delay: 1.0,
             compile_on_quit: false,
             compile_runs: 2,
+            export_on_quit: false,
             open_after_export: false,
             fast_budget_ms: 50.0,
             picture_cache: true,
@@ -1259,10 +1262,16 @@ fn pages(cx: &App) -> Vec<SettingPage> {
                 .disabled(!s.compile_on_quit),
             ]),
         )
-        .group(group(cx).title("Export").item(SettingItem::new(
-            "Open the PDF after export",
-            switch(|s| s.open_after_export, |s, v| s.open_after_export = v),
-        )));
+        .group(group(cx).title("Export").items([
+            SettingItem::new(
+                "Open the PDF after export",
+                switch(|s| s.open_after_export, |s, v| s.open_after_export = v),
+            ),
+            SettingItem::new(
+                "Export the PDF when quitting",
+                switch(|s| s.export_on_quit, |s, v| s.export_on_quit = v),
+            ),
+        ]));
     let appearance = SettingPage::new("Appearance")
         .icon(icon("palette"))
         .group(
@@ -1642,6 +1651,7 @@ mod tests {
         assert_eq!(old.autosave_delay, 1.0);
         assert!(old.picture_cache);
         assert!(!old.compile_on_quit);
+        assert!(!old.export_on_quit);
         assert_eq!(old.compile_runs, 2);
     }
 

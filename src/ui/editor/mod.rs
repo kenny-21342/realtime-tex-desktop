@@ -403,6 +403,16 @@ struct Gap {
     sep_before: bool,
 }
 
+/// Where the PDF exported as the app quits is.
+#[derive(Clone, Copy, PartialEq)]
+enum QuitExport {
+    No,
+    /// To be asked of rtex once the quit's compile runs are done.
+    Wanted,
+    /// Asked: the answer is awaited.
+    Asked,
+}
+
 pub struct Doc {
     /// A PDF or image shown in the viewer instead of text.
     pub view: Option<viewer::View>,
@@ -426,6 +436,8 @@ pub struct Doc {
     pub compiling: bool,
     /// Full compile runs still to make before the app quits (see `compile_for_quit`).
     quit_runs: u32,
+    /// The PDF exported as the app quits (see `export_for_quit`).
+    quit_export: QuitExport,
     /// rtex's events and stderr, oldest first.
     pub log: String,
     /// The last full run's errors and warnings.
@@ -605,6 +617,7 @@ impl Doc {
             status: String::new(),
             compiling: false,
             quit_runs: 0,
+            quit_export: QuitExport::No,
             log: String::new(),
             problems: vec![],
             notices: vec![],
@@ -828,9 +841,44 @@ impl Doc {
         true
     }
 
-    /// Whether the runs asked for by `compile_for_quit` are not all made yet.
+    /// The app is quitting: this document's PDF exported beside its file, after the quit's
+    /// compile runs if there are any. False for what is not a whole TeX document (an included
+    /// chapter) or has no engine to typeset it.
+    pub fn export_for_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.tex || self.rtex.is_none() || !self.source.contains("\\begin{document}") {
+            return false;
+        }
+        self.save(cx);
+        self.quit_export = QuitExport::Wanted;
+        if self.quit_runs == 0 {
+            self.export_now_for_quit();
+        }
+        cx.notify();
+        true
+    }
+
+    /// The export wanted for the quit asked of rtex, the compile runs being over.
+    fn export_now_for_quit(&mut self) {
+        if self.quit_export != QuitExport::Wanted {
+            return;
+        }
+        let Some(r) = self.rtex.as_mut() else {
+            self.quit_export = QuitExport::No;
+            return;
+        };
+        let out = self.root.join(&self.path).with_extension("pdf");
+        r.export_pdf(&out);
+        self.quit_export = QuitExport::Asked;
+        let name = out
+            .file_name()
+            .map_or(String::new(), |n| n.to_string_lossy().to_string());
+        self.status = format!("Exporting {name} before quitting… (⌘Q again quits now)");
+    }
+
+    /// Whether what the quit asked for (`compile_for_quit`'s runs, `export_for_quit`'s PDF) is
+    /// not all done yet.
     pub fn quit_compiling(&self) -> bool {
-        self.quit_runs > 0
+        self.quit_runs > 0 || self.quit_export != QuitExport::No
     }
 
     /// A full run came back: the next of the quit's runs asked for, if there is one.
@@ -845,6 +893,9 @@ impl Doc {
                 self.compiling = true;
             }
             _ => self.quit_runs = 0,
+        }
+        if self.quit_runs == 0 {
+            self.export_now_for_quit();
         }
     }
 
@@ -1209,6 +1260,7 @@ impl Doc {
                     .pb(px(48.0))
                     .px_8()
                     .relative()
+                    .min_w(px(self.column_min_width()))
                     .children(pages)
                     .context_menu(self.page_menu(cx)),
             );

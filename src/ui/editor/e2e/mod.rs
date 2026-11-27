@@ -15,6 +15,7 @@ mod source_mode;
 mod stress;
 mod table;
 mod typing;
+mod zoom;
 
 use super::Doc;
 use crate::engine;
